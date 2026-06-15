@@ -84,8 +84,10 @@ def api(path, retries=8):
     for attempt in range(retries):
         try:
             with urllib.request.urlopen(req, timeout=75) as r:
-                if r.status == 202:                 # stats computing server-side
+                if r.status == 202:                 # stats still computing - retry
                     time.sleep(2 + attempt * 2); continue
+                if r.status == 204:                 # no content (empty repo) - permanent
+                    return []
                 data = r.read()
                 if not data:
                     time.sleep(2 + attempt * 2); continue
@@ -105,25 +107,29 @@ def whoami():
 
 
 def list_repos(target, is_self):
-    """Every repo we can score the target's commits in."""
+    """{full_name: pushed_at} for every repo we can score the target in.
+    pushed_at is the cache key: if a repo hasn't been pushed to, its stats
+    can't have changed, so we never refetch it."""
     base = "user/repos" if is_self else f"users/{target}/repos"
-    repos, page = [], 1
+    repos, page = {}, 1
     while True:
         chunk = api(f"/{base}?per_page=100&page={page}")
         if not chunk:
             break
-        repos += [r["full_name"] for r in chunk]
+        for r in chunk:
+            repos[r["full_name"]] = (r.get("pushed_at") or "")[:19]
         if len(chunk) < 100:
             break
         page += 1
     return repos
 
 
-def collect_repo(repo, target):
+def collect_repo(repo, target, patience=8):
     """Returns (repo, data_or_None, status) where status is ok | empty | fail.
     'fail' means GitHub never returned the stats (202/timeout) - worth a retry;
-    'empty' means the target has no commits here - don't retry."""
-    stats = api(f"/repos/{repo}/stats/contributors")
+    'empty' means the target has no commits here - don't retry.
+    `patience` is the api retry budget (low = quick triage, high = wait it out)."""
+    stats = api(f"/repos/{repo}/stats/contributors", retries=patience)
     if not isinstance(stats, list):
         return repo, None, "fail"
     add_m, com_m, total_add, total_com = defaultdict(int), defaultdict(int), 0, 0
@@ -143,37 +149,96 @@ def collect_repo(repo, target):
                   "total_add": total_add, "total_com": total_com}, "ok"
 
 
-def _scan(repos, target, out, workers, total):
-    """One concurrent sweep; fills `out`, returns the repos that timed out."""
+CACHE_VERSION = 1
+
+
+def _cache_file():
+    return os.path.join(os.path.expanduser("~/.cache/gitquake"), "stats.json")
+
+
+def load_cache():
+    try:
+        with open(_cache_file()) as f:
+            blob = json.load(f)
+        if blob.get("version") == CACHE_VERSION:
+            return blob.get("entries", {})
+    except Exception:
+        pass
+    return {}
+
+
+def save_cache(entries):
+    try:
+        path = _cache_file()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump({"version": CACHE_VERSION, "entries": entries}, f)
+    except Exception:
+        pass
+
+
+def ckey(target, repo, pushed):
+    return f"{target.lower()}::{repo}::{pushed or ''}"
+
+
+def _sweep(repos, target, results, cache, meta, workers, patience, phase):
+    """One concurrent sweep. Records ok/empty results into the cache (empty is
+    cached too, so untouched repos are never refetched). Returns the timeouts."""
     failed = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(collect_repo, r, target): r for r in repos}
+        futs = {ex.submit(collect_repo, r, target, patience): r for r in repos}
         for f in as_completed(futs):
             repo, res, status = f.result()
-            if status == "ok":
-                out[repo] = res
-            elif status == "fail":
+            if status in ("ok", "empty"):
+                cache[ckey(target, repo, meta.get(repo))] = res   # dict, or None for empty
+                if status == "ok":
+                    results[repo] = res
+            else:
                 failed.append(repo)
-            print(f"\r  scanned {len(out)} repos with commits "
-                  f"({len(out) + len(failed)}/{total})",
+            print(f"\r  {phase}: {len(results)} repos with commits",
                   end="", file=sys.stderr, flush=True)
     return failed
 
 
-def collect(repos, target):
-    out = {}
-    # First sweep is concurrent; GitHub computes stats lazily so some repos
-    # answer 202 and time out. A warmer, gentler retry sweep mops those up.
-    failed = _scan(repos, target, out, workers=10, total=len(repos))
-    if failed:
-        print(f"\n  retrying {len(failed)} repos GitHub was still computing...",
-              file=sys.stderr)
-        failed = _scan(failed, target, out, workers=4, total=len(repos))
-    print(file=sys.stderr)
-    if failed:
-        print(f"  note: {len(failed)} repos could not be scored (stats unavailable)",
-              file=sys.stderr)
-    return out
+def collect(repos_meta, target, use_cache=True):
+    cache = load_cache() if use_cache else {}
+    results, to_scan, hits = {}, [], 0
+    for repo, pushed in repos_meta.items():
+        key = ckey(target, repo, pushed)
+        if use_cache and key in cache:
+            hits += 1
+            if cache[key] is not None:
+                results[repo] = cache[key]
+        else:
+            to_scan.append(repo)
+    if use_cache:
+        print(f"  cache: {hits} unchanged, {len(to_scan)} to fetch", file=sys.stderr)
+
+    if to_scan:
+        # Phase 1 warms GitHub's lazy stats (quick, fire-and-move-on); repos
+        # already computed return immediately. Phase 2 collects what was still
+        # computing after a short wait; phase 3 mops up any stragglers.
+        pending = _sweep(to_scan, target, results, cache, repos_meta,
+                         workers=16, patience=1, phase="warming")
+        if pending:
+            time.sleep(4)
+            pending = _sweep(pending, target, results, cache, repos_meta,
+                             workers=10, patience=8, phase="collecting")
+        if pending:
+            pending = _sweep(pending, target, results, cache, repos_meta,
+                             workers=4, patience=8, phase="retrying")
+        print(file=sys.stderr)
+        if pending:
+            print(f"  note: {len(pending)} repos could not be scored (stats unavailable)",
+                  file=sys.stderr)
+
+    if use_cache:
+        current = {ckey(target, r, p) for r, p in repos_meta.items()}
+        prefix = target.lower() + "::"
+        cache = {k: v for k, v in cache.items()
+                 if not k.startswith(prefix) or k in current}   # drop this target's stale keys
+        save_cache(cache)
+    return results
 
 
 def build_payload(repos, target):
@@ -250,6 +315,8 @@ def main():
     ap.add_argument("--user", help="GitHub login (default: the authenticated user)")
     ap.add_argument("--out", default="seismograph.html", help="output HTML file")
     ap.add_argument("--open", action="store_true", help="open the result in your browser")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="ignore the on-disk cache and refetch every repo")
     args = ap.parse_args()
 
     TOKEN = gh_token()
@@ -261,8 +328,8 @@ def main():
 
     print(f"gitquake: charting @{target}", file=sys.stderr)
     repos = list_repos(target, is_self)
-    print(f"  found {len(repos)} repositories to scan", file=sys.stderr)
-    data = collect(repos, target)
+    print(f"  found {len(repos)} repositories", file=sys.stderr)
+    data = collect(repos, target, use_cache=not args.no_cache)
     payload = build_payload(data, target)
     with open(args.out, "w") as f:
         f.write(render_html(payload))

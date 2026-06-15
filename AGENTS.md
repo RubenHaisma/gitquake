@@ -39,4 +39,18 @@ Fonts over the network).
   variables for palette, the `<canvas>` render loop for the trace).
 - **Filter strictness:** tune `BULK_RATIO`. Set it very high to keep everything (raw).
 
+## Performance
+
+The whole job is I/O-bound: it waits on GitHub's `stats/contributors` endpoint,
+which computes lazily and answers `202` while it works (and `204` for empty repos).
+A cold run is minutes of network wait but ~1s of CPU - rewriting it in a "faster
+language" buys nothing. The levers that actually matter are already here:
+
+- **Per-repo cache** keyed by last-push at `~/.cache/gitquake/stats.json`. Unchanged
+  repos are never refetched, so re-runs finish in seconds. `--no-cache` bypasses it.
+- **Warm → collect → retry** sweep that triggers GitHub's lazy computation up front
+  instead of blocking on it repo-by-repo.
+
+If you want it faster still, reduce *requests*, not CPU.
+
 Keep it one file. No dependencies. That's the point.

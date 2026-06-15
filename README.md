@@ -41,6 +41,9 @@ one command, a self-contained HTML file out the other end.
   generated files) so the trace reflects code you wrote, not code you pasted.
 - Inlines the data and a curated AI-model-release timeline into a single animated
   HTML file. The seismograph pen draws itself on load; toggle **Lines / Raw / Tremors**.
+- Caches each repo's stats by last-push, so the first run takes a few minutes (it is
+  almost entirely network wait) but every re-run finishes in seconds. `--no-cache`
+  forces a full refresh.
 
 ## Honest caveats
 
