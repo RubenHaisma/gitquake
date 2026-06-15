@@ -1,0 +1,10 @@
+# generated output
+seismograph.html
+*.seismograph.html
+
+# python
+__pycache__/
+*.pyc
+
+# os
+.DS_Store
