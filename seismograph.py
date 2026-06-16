@@ -8,16 +8,21 @@ per-contributor weekly stats). It lies near-flat for years, then ruptures
 where your output exploded - often right where the coding-model fault
 lines cluster.
 
-Usage:
-    gh auth login                 # one time
-    python3 seismograph.py        # builds seismograph.html for the logged-in user
-    python3 seismograph.py --user torvalds
-    python3 seismograph.py --user octocat --out octocat.html --open
+One-shot, no clone, no setup beyond Python 3.8+:
 
-No third-party dependencies. Python 3.8+ and the GitHub CLI (`gh`), or a
-GITHUB_TOKEN environment variable.
+    curl -fsSL https://raw.githubusercontent.com/RubenHaisma/gitquake/main/seismograph.py | python3 - --open
+
+Or with a local copy:
+
+    python3 seismograph.py --open                 # builds seismograph.html for you
+    python3 seismograph.py --user torvalds --open
+
+Auth resolves automatically: GITHUB_TOKEN env -> the `gh` CLI -> a cached token ->
+a GitHub device-code login (prints a code, you paste it once in the browser). No
+third-party dependencies.
 """
-import argparse, json, os, subprocess, sys, time, urllib.request, urllib.error
+import argparse, json, os, subprocess, sys, time
+import urllib.request, urllib.error, urllib.parse
 import datetime as dt
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -63,14 +68,111 @@ VENDOR_COLORS = {"OpenAI": "#19c37d", "Anthropic": "#ff8a5b", "Google": "#5b9bff
                  "Meta": "#6f86d6", "DeepSeek": "#b58cff"}
 
 
-def gh_token():
-    tok = os.environ.get("GITHUB_TOKEN")
-    if tok:
-        return tok.strip()
+# Device-flow login so the tool needs no `gh` and no manually-created token.
+# Default client_id is the GitHub CLI's public OAuth app (the consent screen will
+# read "GitHub CLI"); register your own device-flow OAuth app and set
+# GITQUAKE_CLIENT_ID to brand it. The id is public - there is no secret here.
+CLIENT_ID = os.environ.get("GITQUAKE_CLIENT_ID", "178c6fc778ccc68e1d6a")
+SCOPES = "repo read:org"      # read private repo stats + org membership
+
+
+def _token_path():
+    return os.path.join(os.path.expanduser("~/.cache/gitquake"), "token")
+
+
+def _read_cached_token():
     try:
-        return subprocess.check_output(["gh", "auth", "token"], text=True).strip()
+        with open(_token_path()) as f:
+            return f.read().strip() or None
     except Exception:
-        sys.exit("No credentials. Run `gh auth login` or set GITHUB_TOKEN.")
+        return None
+
+
+def _save_token(tok):
+    try:
+        p = _token_path()
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(tok)
+        os.chmod(p, 0o600)
+    except Exception:
+        pass
+
+
+def _clear_cached_token():
+    try:
+        os.remove(_token_path())
+    except Exception:
+        pass
+
+
+def _gh_cli_token():
+    try:
+        out = subprocess.run(["gh", "auth", "token"], capture_output=True,
+                             text=True, timeout=10)
+        return out.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def _post_form(url, fields):
+    req = urllib.request.Request(
+        url, data=urllib.parse.urlencode(fields).encode(),
+        headers={"Accept": "application/json", "User-Agent": "gitquake"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+
+
+def device_flow():
+    """Print a code, let the user authorize in the browser, poll for the token."""
+    try:
+        start = _post_form("https://github.com/login/device/code",
+                           {"client_id": CLIENT_ID, "scope": SCOPES})
+    except Exception as e:
+        sys.exit(f"Could not start GitHub login: {e}")
+    if "device_code" not in start:
+        sys.exit(f"GitHub login error: {start}")
+    uri = start.get("verification_uri", "https://github.com/login/device")
+    print(f"\n  Authorize GitHub access:\n"
+          f"    open   {uri}\n"
+          f"    enter  {start['user_code']}\n", file=sys.stderr)
+    try:
+        import webbrowser; webbrowser.open(uri)
+    except Exception:
+        pass
+    interval = int(start.get("interval", 5)) + 1
+    deadline = time.time() + int(start.get("expires_in", 899))
+    while time.time() < deadline:
+        time.sleep(interval)
+        try:
+            r = _post_form("https://github.com/login/oauth/access_token",
+                           {"client_id": CLIENT_ID, "device_code": start["device_code"],
+                            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"})
+        except Exception:
+            continue
+        if r.get("access_token"):
+            _save_token(r["access_token"])
+            print("  authorized.\n", file=sys.stderr)
+            return r["access_token"]
+        if r.get("error") == "slow_down":
+            interval += int(r.get("interval", 5))
+        elif r.get("error") not in ("authorization_pending", None):
+            sys.exit(f"  login failed: {r.get('error')}")
+    sys.exit("  login timed out - re-run and enter the code sooner.")
+
+
+def resolve_token():
+    """env token -> gh CLI -> cached token -> interactive device login."""
+    t = os.environ.get("GITHUB_TOKEN")
+    if t:
+        return t.strip(), "env"
+    t = _gh_cli_token()
+    if t:
+        return t, "gh"
+    t = _read_cached_token()
+    if t:
+        return t, "cache"
+    return device_flow(), "device"
 
 
 TOKEN = None
@@ -319,8 +421,15 @@ def main():
                     help="ignore the on-disk cache and refetch every repo")
     args = ap.parse_args()
 
-    TOKEN = gh_token()
+    TOKEN, src = resolve_token()
     me = whoami()
+    if me is None and src != "device":          # stored token missing/expired
+        print("  stored credentials invalid - logging in...", file=sys.stderr)
+        _clear_cached_token()
+        TOKEN, src = device_flow(), "device"
+        me = whoami()
+    if me is None and src == "device":
+        sys.exit("Authentication failed.")
     target = args.user or me
     if not target:
         sys.exit("Could not determine a username. Pass --user.")

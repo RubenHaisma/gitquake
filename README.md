@@ -9,20 +9,21 @@ lines cluster.
 
 ## Quickstart
 
-One file, no dependencies. You need Python 3.8+ and the [GitHub CLI](https://cli.github.com/).
+One command. No clone, no install, no setup beyond Python 3.8+:
 
 ```bash
-gh auth login
-python3 seismograph.py --open
+curl -fsSL https://raw.githubusercontent.com/RubenHaisma/gitquake/main/seismograph.py | python3 - --open
 ```
 
-That builds `seismograph.html` for the logged-in user and opens it. Chart anyone:
+It builds `seismograph.html` and opens it. First run, it prints a GitHub device
+code to paste in the browser (or silently reuses your `gh` / `GITHUB_TOKEN` if you
+already have one). Chart anyone:
 
 ```bash
-python3 seismograph.py --user torvalds --open
+curl -fsSL https://raw.githubusercontent.com/RubenHaisma/gitquake/main/seismograph.py | python3 - --user torvalds --open
 ```
 
-No `gh`? Set a token instead: `export GITHUB_TOKEN=ghp_…`
+Prefer a local copy? `python3 seismograph.py --open` works exactly the same.
 
 ## Drop it in an agent
 

@@ -6,9 +6,16 @@ lines-added-per-month is the ground motion, major AI model releases are fault li
 ## Build it
 
 ```bash
-gh auth login                 # once; or export GITHUB_TOKEN=...
-python3 seismograph.py        # -> seismograph.html for the logged-in user
+# one-shot, no clone:
+curl -fsSL https://raw.githubusercontent.com/RubenHaisma/gitquake/main/seismograph.py | python3 - --open
+# or local:
+python3 seismograph.py --open
 ```
+
+Auth is automatic, resolved in order: `GITHUB_TOKEN` env -> `gh` CLI -> a cached
+token (`~/.cache/gitquake/token`) -> GitHub **device-flow** login (prints a code,
+user pastes it once in the browser; no `gh` needed). Override the OAuth app with
+`GITQUAKE_CLIENT_ID`.
 
 Useful flags:
 
