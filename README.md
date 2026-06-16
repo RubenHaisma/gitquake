@@ -7,32 +7,17 @@ lines cluster.
 
 ![gitquake seismograph](docs/preview.png)
 
-## Quickstart
+## Hand it to your agent
 
-One command. No clone, no install, no setup beyond Python 3.8+:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/RubenHaisma/gitquake/main/seismograph.py | python3 - --open
-```
-
-It builds `seismograph.html` and opens it. First run, it prints a GitHub device
-code to paste in the browser (or silently reuses your `gh` / `GITHUB_TOKEN` if you
-already have one). Chart anyone:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/RubenHaisma/gitquake/main/seismograph.py | python3 - --user torvalds --open
-```
-
-Prefer a local copy? `python3 seismograph.py --open` works exactly the same.
-
-## Drop it in an agent
-
-Point any coding agent at this repo and say:
+gitquake is built to be driven by a coding agent, not installed by hand. Point any
+agent at this repo and say:
 
 > Build me a gitquake seismograph for GitHub user `<name>`.
 
-It has everything it needs — see [`AGENTS.md`](AGENTS.md). One stdlib-only script,
-one command, a self-contained HTML file out the other end.
+Your agent already has the runtime (Python) and GitHub creds (`GITHUB_TOKEN` / `gh`),
+so it just runs `python3 seismograph.py --user <name> --open` and reads
+[`AGENTS.md`](AGENTS.md) to customize. One stdlib-only script in, a self-contained
+animated HTML file out. No package installs, no setup.
 
 ## How it works
 
